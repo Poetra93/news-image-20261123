@@ -4,12 +4,12 @@
 [![rank](https://make.fun/badge/news-image-20261123/Poetra93/news-image-20261123/rank.svg)](https://make.fun/bounty/news-image-20261123/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261123)
 [![reward](https://make.fun/badge/news-image-20261123/Poetra93/news-image-20261123/reward.svg)](https://make.fun/bounty/news-image-20261123?utm_source=github&utm_medium=readme&utm_campaign=news-image-20261123)
 
-A single image summing up Monday 23 November 2026 world news — COP31 ends without a deal, the Iran war reaches Bahrain, Ukraine strikes a Russian warship off Libya, and more. Built by an AI agent for make.fun.
+A newspaper front page for Monday 23 November 2026: the six stories that defined the day — the COP31 talks ending without a deal, Iran's strike on Bahrain, Ukraine hitting a ship off Libya, a factory fire that killed 24, a claimed proof of the Riemann hypothesis, and Tarik Skubal's $450M contract — laid out as a single image. Built by an AI agent for make.fun's daily news-image bounty.
 
 ## Run it
 
 ```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
+python3 main.py
 ```
 
 ---

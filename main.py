@@ -1,100 +1,127 @@
 #!/usr/bin/env python3
-"""news-image-20261123 entrypoint.
+"""Ship the front page for Monday 23 November 2026.
 
-Copies the front page (front-page.png) built for this entry to the
-output directory as entry.png. Before copying it checks the file is a
-real PNG, no bigger than 1 MiB and no larger than 1024x1024 pixels.
-Python 3.13 standard library only; no network access. Deterministic:
-every run writes the same bytes.
+The repository holds one finished newspaper front page,
+``front-page.png``. This program checks it against the entry rules
+for the make.fun news-image bounty and, when it passes, places an
+exact copy at ``$MAKEFUN_OUTPUT_DIR/entry.png`` (``/output/entry.png``
+when that variable is unset).
+
+Checks performed, all with the standard library only:
+
+* the file is a real PNG (magic bytes) and no bigger than 1 MiB;
+* its picture is at most 1024 pixels on either side;
+* every chunk carries a correct CRC32, the first chunk is IHDR,
+  and the file ends with a proper IEND chunk and nothing after it.
+
+Nothing here draws or alters the picture: the shipped file is the
+same bytes as the source, so the run is deterministic.
 """
 
-import hashlib
+from __future__ import annotations
+
 import os
-import shutil
 import struct
 import sys
 import zlib
+from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SOURCE = os.path.join(HERE, "front-page.png")
-LIMIT_BYTES = 1048576
-LIMIT_SIDE = 1024
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+MAX_FILE_BYTES = 1 << 20  # 1 MiB, the entry ceiling
+MAX_SIDE_PIXELS = 1024
+SOURCE_NAME = "front-page.png"
+DEST_NAME = "entry.png"
 
 
-def check_chunks(blob):
-    """Walk every PNG chunk, verifying CRCs; require IEND with no tail."""
-    cursor = 8
+class FrontPageError(Exception):
+    """The front page breaks one of the entry rules."""
+
+
+def _u32be(blob: bytes, at: int) -> int:
+    """One unsigned big-endian 32-bit word out of ``blob``."""
+    return struct.unpack_from(">I", blob, at)[0]
+
+
+def _read_source() -> bytes:
+    """Load the front page and check its size and magic bytes."""
+    here = Path(__file__).resolve().parent
+    raw = (here / SOURCE_NAME).read_bytes()
+    if len(raw) > MAX_FILE_BYTES:
+        raise FrontPageError(
+            f"{SOURCE_NAME} is {len(raw)} bytes, over the 1 MiB ceiling"
+        )
+    if raw[: len(PNG_MAGIC)] != PNG_MAGIC:
+        raise FrontPageError(f"{SOURCE_NAME} does not start with PNG magic bytes")
+    return raw
+
+
+def _dimensions(raw: bytes) -> tuple[int, int]:
+    """Width and height out of the IHDR chunk at the head of the file."""
+    if len(raw) < 8 + 8 + 13 + 4:
+        raise FrontPageError("file too short to hold an IHDR chunk")
+    if _u32be(raw, 8) != 13 or raw[12:16] != b"IHDR":
+        raise FrontPageError("first chunk is not a 13-byte IHDR")
+    return _u32be(raw, 16), _u32be(raw, 20)
+
+
+def _walk_chunks(raw: bytes) -> None:
+    """Walk every chunk, checking CRC32s and the closing IEND."""
+    offset = 8
     first = True
-    saw_iend = False
-    while cursor < len(blob):
-        if cursor + 8 > len(blob):
-            raise ValueError("chunk header cut short at offset %d" % cursor)
-        size = struct.unpack(">I", blob[cursor:cursor + 4])[0]
-        kind = blob[cursor + 4:cursor + 8]
-        stop = cursor + 8 + size + 4
-        if stop > len(blob):
-            raise ValueError(
-                "chunk %s runs past the end of the file"
-                % kind.decode("latin-1")
-            )
-        stored = struct.unpack(">I", blob[stop - 4:stop])[0]
-        actual = zlib.crc32(kind + blob[cursor + 8:cursor + 8 + size])
-        actual &= 0xFFFFFFFF
-        if stored != actual:
-            raise ValueError(
-                "checksum mismatch in %s chunk" % kind.decode("latin-1")
-            )
+    closed = False
+    while offset < len(raw):
+        if offset + 8 > len(raw):
+            raise FrontPageError(f"truncated chunk header at byte {offset}")
+        length = _u32be(raw, offset)
+        kind = raw[offset + 4 : offset + 8]
+        data_start = offset + 8
+        data_end = data_start + length
+        if data_end + 4 > len(raw):
+            raise FrontPageError(f"chunk {kind!r} runs past the end of the file")
+        stored_crc = _u32be(raw, data_end)
+        actual_crc = zlib.crc32(raw[offset + 4 : data_end]) & 0xFFFFFFFF
+        if actual_crc != stored_crc:
+            raise FrontPageError(f"chunk {kind!r} has a bad CRC32")
         if first and kind != b"IHDR":
-            raise ValueError("first chunk is not IHDR")
+            raise FrontPageError("first chunk is not IHDR")
         first = False
-        cursor = stop
         if kind == b"IEND":
-            saw_iend = True
+            if length != 0:
+                raise FrontPageError("IEND chunk carries data")
+            if data_end + 4 != len(raw):
+                raise FrontPageError("bytes follow the IEND chunk")
+            closed = True
             break
-    if not saw_iend:
-        raise ValueError("PNG has no IEND chunk")
-    if cursor != len(blob):
-        raise ValueError(
-            "%d trailing bytes after IEND" % (len(blob) - cursor)
-        )
+        offset = data_end + 4
+    if not closed:
+        raise FrontPageError("no closing IEND chunk found")
 
 
-def inspect(path):
-    """Return (width, height, size, sha256) after validating the PNG."""
-    with open(path, "rb") as handle:
-        blob = handle.read()
-    if blob[:8] != PNG_MAGIC:
-        raise ValueError("front-page.png is not a PNG file")
-    if len(blob) > LIMIT_BYTES:
-        raise ValueError(
-            "front-page.png is %d bytes, over the 1 MiB limit" % len(blob)
-        )
-    check_chunks(blob)
-    width, height = struct.unpack(">II", blob[16:24])
-    if width > LIMIT_SIDE or height > LIMIT_SIDE:
-        raise ValueError(
-            "image is %dx%d, over the 1024x1024 limit" % (width, height)
-        )
-    return width, height, len(blob), hashlib.sha256(blob).hexdigest()
+def _ship(raw: bytes) -> Path:
+    """Write the validated bytes to the output entry path."""
+    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / DEST_NAME
+    dest.write_bytes(raw)
+    return dest
 
 
-def main():
-    target = os.environ.get("MAKEFUN_OUTPUT_DIR") or "out"
-    width, height, size, digest = inspect(SOURCE)
-    os.makedirs(target, exist_ok=True)
-    destination = os.path.join(target, "entry.png")
-    shutil.copyfile(SOURCE, destination)
-    with open(destination, "rb") as handle:
-        copied = handle.read()
-    if hashlib.sha256(copied).hexdigest() != digest:
-        raise ValueError("entry.png does not match front-page.png")
-    print(
-        "wrote %s (%dx%d, %d bytes, sha256 %s)"
-        % (destination, width, height, size, digest)
-    )
+def main() -> int:
+    try:
+        raw = _read_source()
+        width, height = _dimensions(raw)
+        if width > MAX_SIDE_PIXELS or height > MAX_SIDE_PIXELS:
+            raise FrontPageError(
+                f"picture is {width}x{height}, over the 1024x1024 ceiling"
+            )
+        _walk_chunks(raw)
+    except FrontPageError as exc:
+        print(f"front page rejected: {exc}", file=sys.stderr)
+        return 1
+    dest = _ship(raw)
+    print(f"front page ok: {len(raw)} bytes -> {dest}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
